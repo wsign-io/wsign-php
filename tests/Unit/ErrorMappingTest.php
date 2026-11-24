@@ -1,0 +1,264 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Wsign\Tests\Unit;
+
+use PHPUnit\Framework\Attributes\DataProvider;
+use Wsign\Exception\ApiException;
+use Wsign\Exception\AuthenticationException;
+use Wsign\Exception\ConflictException;
+use Wsign\Exception\ExceptionInterface;
+use Wsign\Exception\InvalidRequestException;
+use Wsign\Exception\NotFoundException;
+use Wsign\Exception\PaymentRequiredException;
+use Wsign\Exception\PermissionException;
+use Wsign\Exception\RateLimitException;
+use Wsign\Exception\ServerException;
+use Wsign\Exception\TooManySignersException;
+use Wsign\Exception\UnexpectedResponseException;
+use Wsign\Exception\ValidationException;
+use Wsign\HttpClient\HttpResponse;
+
+final class ErrorMappingTest extends TestCase
+{
+    /**
+     * @return iterable<string, array{int, string, string, class-string<ApiException>}>
+     */
+    public static function statuses(): iterable
+    {
+        yield '400' => [400, 'invalid_request_error', 'parameter_missing', ValidationException::class];
+        yield '401' => [401, 'authentication_error', 'invalid_api_key', AuthenticationException::class];
+        yield '402' => [402, 'quota_error', 'insufficient_balance', PaymentRequiredException::class];
+        yield '403' => [403, 'permission_error', 'kyb_required', PermissionException::class];
+        yield '404' => [404, 'invalid_request_error', 'resource_missing', NotFoundException::class];
+        yield '405' => [405, 'invalid_request_error', 'method_not_allowed', InvalidRequestException::class];
+        yield '409' => [409, 'invalid_request_error', 'request_not_cancelable', ConflictException::class];
+        yield '429' => [429, 'rate_limit_error', 'reminder_limit_reached', RateLimitException::class];
+        yield '500' => [500, 'api_error', 'internal_error', ServerException::class];
+        yield '501' => [501, 'api_error', 'not_implemented', ServerException::class];
+    }
+
+    /**
+     * @param class-string<ApiException> $class
+     */
+    #[DataProvider('statuses')]
+    public function testStatusMapsToException(int $status, string $type, string $code, string $class): void
+    {
+        $client = $this->client([self::error($status, $type, $code, 'signers[0].email')], ['max_retries' => 0]);
+        try {
+            $client->signatureRequests->retrieve('sr_x');
+            self::fail('Expected ' . $class);
+        } catch (ApiException $e) {
+            self::assertInstanceOf($class, $e);
+            self::assertInstanceOf(ExceptionInterface::class, $e);
+            self::assertSame($status, $e->getHttpStatus());
+            self::assertSame($status, $e->getCode());
+            self::assertSame($type, $e->getErrorType());
+            self::assertSame($code, $e->getErrorCode());
+            self::assertSame('signers[0].email', $e->getParam());
+            self::assertSame('req_err000000000000001', $e->getRequestId());
+            self::assertSame('Error message for ' . $code, $e->getMessage());
+            self::assertStringContainsString($code, $e->getHttpBody());
+        }
+    }
+
+    public function testValidationExceptionFieldErrors(): void
+    {
+        $client = $this->client([self::error(400, 'invalid_request_error', 'invalid_request', 'signers[0].email')]);
+        try {
+            $client->signatureRequests->create(['source' => [], 'signers' => []]);
+            self::fail('Expected ValidationException');
+        } catch (ValidationException $e) {
+            self::assertSame(['signers[0].email' => 'Error message for invalid_request'], $e->getFieldErrors());
+        }
+    }
+
+    public function testPlanFeatureUnavailableCarriesPlanDetails(): void
+    {
+        $client = $this->client([self::error(403, 'permission_error', 'plan_feature_unavailable', 'recipients', [
+            'feature' => 'bulk', 'required_plan' => 'ap_ent', 'upgrade_url' => 'https://developers.wsign.io/plans',
+        ])]);
+        try {
+            $client->signatureRequests->createBulk(['source' => [], 'recipients' => []]);
+            self::fail('Expected PermissionException');
+        } catch (PermissionException $e) {
+            self::assertTrue($e->isPlanFeatureUnavailable());
+            self::assertFalse($e->isKybRequired());
+            self::assertSame('bulk', $e->getFeature());
+            self::assertSame('ap_ent', $e->getRequiredPlan());
+            self::assertSame('https://developers.wsign.io/plans', $e->getUpgradeUrl());
+            self::assertSame('bulk', $e->getError()['feature']);
+        }
+    }
+
+    public function testKybRequiredPointsToTheVerificationPage(): void
+    {
+        $client = $this->client([self::error(403, 'permission_error', 'kyb_required')]);
+        try {
+            $client->signatureRequests->send('sr_x');
+            self::fail('Expected PermissionException');
+        } catch (PermissionException $e) {
+            self::assertTrue($e->isKybRequired());
+            self::assertNull($e->getFeature());
+            self::assertSame(PermissionException::VERIFY_URL, $e->getUpgradeUrl());
+        }
+    }
+
+    public function testPaymentRequiredHelpers(): void
+    {
+        foreach (['plan_required' => 'isPlanRequired', 'plan_expired' => 'isPlanExpired', 'insufficient_balance' => 'isInsufficientBalance'] as $code => $method) {
+            $client = $this->client([self::error(402, 'quota_error', $code)]);
+            try {
+                $client->signatureRequests->create(['source' => [], 'signers' => []]);
+                self::fail('Expected PaymentRequiredException');
+            } catch (PaymentRequiredException $e) {
+                self::assertTrue($e->{$method}());
+                self::assertSame(PaymentRequiredException::PLANS_URL, $e->getUpgradeUrl());
+            }
+        }
+    }
+
+    public function testTooManySignersIsTypedAndCarriesTheLimit(): void
+    {
+        $client = $this->client([
+            self::error(400, 'invalid_request_error', 'too_many_signers', 'signers', ['max_signers' => 5]),
+            self::error(400, 'invalid_request_error', 'too_many_signers', 'signers', ['max_signers' => 3]),
+            self::error(400, 'invalid_request_error', 'too_many_signers', 'signers'),
+            self::error(400, 'invalid_request_error', 'too_many_signers', 'signers', ['max_signers' => '5']),
+            self::error(400, 'invalid_request_error', 'test_signer_limit', 'signers'),
+        ]);
+        $limits = [];
+        for ($i = 0; $i < 4; ++$i) {
+            try {
+                $client->signatureRequests->create(['source' => [], 'signers' => []]);
+                self::fail('Expected TooManySignersException');
+            } catch (TooManySignersException $e) {
+                self::assertInstanceOf(ValidationException::class, $e);
+                self::assertSame('too_many_signers', $e->getErrorCode());
+                self::assertSame(['signers' => 'Error message for too_many_signers'], $e->getFieldErrors());
+                $limits[] = $e->getMaxSigners();
+            }
+        }
+        self::assertSame([5, 3, TooManySignersException::MAX_SIGNERS, TooManySignersException::MAX_SIGNERS], $limits);
+        self::assertSame(5, TooManySignersException::MAX_SIGNERS);
+        try {
+            $client->signatureRequests->create(['source' => [], 'signers' => []]);
+            self::fail('Expected ValidationException');
+        } catch (ValidationException $e) {
+            self::assertNotInstanceOf(TooManySignersException::class, $e);
+        }
+    }
+
+    public function testPlanAndKybErrorsUseTheUrlsSentByTheApi(): void
+    {
+        $plans = 'https://developers.wsign.io/plans';
+        $verify = 'https://developers.wsign.io/verify';
+        $client = $this->client([
+            self::error(402, 'quota_error', 'plan_required', null, ['upgrade_url' => $plans . '?from=required']),
+            self::error(402, 'quota_error', 'plan_expired', null, ['upgrade_url' => $plans . '?from=expired']),
+            self::error(403, 'permission_error', 'kyb_required', null, ['verify_url' => $verify . '?step=2']),
+            self::error(403, 'permission_error', 'plan_feature_unavailable', 'mode', ['feature' => 'embed', 'required_plan' => 'ap_biz', 'upgrade_url' => $plans]),
+            self::error(403, 'invalid_request_error', 'forbidden'),
+        ]);
+        foreach (['required', 'expired'] as $which) {
+            try {
+                $client->signatureRequests->send('sr_x');
+                self::fail('Expected PaymentRequiredException');
+            } catch (PaymentRequiredException $e) {
+                self::assertSame($plans . '?from=' . $which, $e->getUpgradeUrl());
+            }
+        }
+        try {
+            $client->signatureRequests->send('sr_x');
+            self::fail('Expected PermissionException');
+        } catch (PermissionException $e) {
+            self::assertTrue($e->isKybRequired());
+            self::assertSame($verify . '?step=2', $e->getVerifyUrl());
+            self::assertSame($verify . '?step=2', $e->getUpgradeUrl());
+        }
+        try {
+            $client->signers->createSigningSession('sgr_1');
+            self::fail('Expected PermissionException');
+        } catch (PermissionException $e) {
+            self::assertSame($plans, $e->getUpgradeUrl());
+            self::assertNull($e->getVerifyUrl());
+            self::assertSame('ap_biz', $e->getRequiredPlan());
+        }
+        try {
+            $client->account->retrieve();
+            self::fail('Expected PermissionException');
+        } catch (PermissionException $e) {
+            self::assertNull($e->getVerifyUrl());
+            self::assertNull($e->getUpgradeUrl());
+        }
+    }
+
+    public function testKybRequiredWithoutAUrlFallsBackToTheVerificationPage(): void
+    {
+        $client = $this->client([self::error(403, 'permission_error', 'kyb_required')]);
+        try {
+            $client->signatureRequests->send('sr_x');
+            self::fail('Expected PermissionException');
+        } catch (PermissionException $e) {
+            self::assertSame(PermissionException::VERIFY_URL, $e->getVerifyUrl());
+        }
+    }
+
+    public function testRateLimitRetryAfter(): void
+    {
+        $client = $this->client([self::error(429, 'rate_limit_error', 'daily_cap_reached', null, [], ['Retry-After' => '3600'])]);
+        try {
+            $client->signatureRequests->create(['source' => [], 'signers' => []]);
+            self::fail('Expected RateLimitException');
+        } catch (RateLimitException $e) {
+            self::assertSame(3600, $e->getRetryAfter());
+            self::assertFalse($e->isTransient());
+        }
+        self::assertCount(1, $this->http->requests, 'Quota-style 429 must not be retried');
+    }
+
+    public function testErrorWithoutJsonBody(): void
+    {
+        $client = $this->client([new HttpResponse(502, ['Content-Type' => 'text/html'], '<html><body>Bad gateway</body></html>')], ['max_retries' => 0]);
+        try {
+            $client->account->retrieve();
+            self::fail('Expected ServerException');
+        } catch (ServerException $e) {
+            self::assertNull($e->getErrorCode());
+            self::assertStringContainsString('HTTP 502', $e->getMessage());
+            self::assertStringContainsString('Bad gateway', $e->getMessage());
+        }
+    }
+
+    public function testRequestIdFallsBackToTheHeader(): void
+    {
+        $client = $this->client([new HttpResponse(404, ['Wsign-Request-Id' => 'req_header0000000001'], '{"error":{"type":"invalid_request_error","code":"resource_missing","message":"Not found"}}')]);
+        try {
+            $client->events->retrieve('evt_x');
+            self::fail('Expected NotFoundException');
+        } catch (NotFoundException $e) {
+            self::assertSame('req_header0000000001', $e->getRequestId());
+            self::assertSame('req_header0000000001', $e->getHttpHeader('Wsign-Request-Id'));
+        }
+    }
+
+    public function testInvalidJsonOnSuccessThrowsUnexpectedResponse(): void
+    {
+        $client = $this->client([new HttpResponse(200, [], '<html>maintenance</html>')]);
+        $this->expectException(UnexpectedResponseException::class);
+        $client->account->retrieve();
+    }
+
+    public function testJsonThatIsNotAnObjectThrowsUnexpectedResponse(): void
+    {
+        $client = $this->client([new HttpResponse(200, [], '[1,2]')]);
+        try {
+            $client->account->retrieve();
+            self::fail('Expected UnexpectedResponseException');
+        } catch (UnexpectedResponseException $e) {
+            self::assertSame(200, $e->getHttpStatus());
+            self::assertSame('[1,2]', $e->getHttpBody());
+        }
+    }
+}

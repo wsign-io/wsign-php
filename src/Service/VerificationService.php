@@ -1,0 +1,47 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Wsign\Service;
+
+use Wsign\Exception\NotFoundException;
+use Wsign\HttpClient\HttpResponse;
+use Wsign\RequestOptions;
+use Wsign\Resource\ObjectFactory;
+use Wsign\Resource\Verification;
+
+final class VerificationService extends AbstractService
+{
+    /**
+     * Looks up a verification reference such as `WTQ-1A2B3C4D5E6F`.
+     *
+     * An unknown reference does not throw: the result has `found === false` and `status === 'not_found'`,
+     * whether the API answers 404 with a verification body or with the error code `not_found`.
+     *
+     * @param array<string, mixed>|RequestOptions|null $options
+     */
+    public function retrieve(string $reference, array|RequestOptions|null $options = null): Verification
+    {
+        try {
+            return $this->requestObject(Verification::class, 'GET', self::path('/verifications/%s', $reference), [], $options);
+        } catch (NotFoundException $e) {
+            $response = new HttpResponse($e->getHttpStatus(), $e->getHttpHeaders(), $e->getHttpBody());
+            $decoded = json_decode($e->getHttpBody(), true);
+            if (\is_array($decoded) && ($decoded['object'] ?? null) === 'verification' && !isset($decoded['error'])) {
+                $object = ObjectFactory::fromResponse($response);
+
+                return $object instanceof Verification ? $object : Verification::fromObject($object);
+            }
+            if ($e->getErrorCode() === 'not_found') {
+                return Verification::constructFrom([
+                    'object' => 'verification',
+                    'reference' => $reference,
+                    'found' => false,
+                    'status' => 'not_found',
+                    'integrity' => 'unknown',
+                ], $response);
+            }
+            throw $e;
+        }
+    }
+}

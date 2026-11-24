@@ -1,0 +1,78 @@
+{
+    "name": "wsign/wsign-php",
+    "description": "Official PHP library for the wsign e-signature API: signature requests, templates, sessions, embedded signing, evidence records and webhooks.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "wsign",
+        "e-signature",
+        "esignature",
+        "electronic signature",
+        "digital signature",
+        "signature request",
+        "contracts",
+        "api",
+        "sdk",
+        "webhooks"
+    ],
+    "homepage": "https://developers.wsign.io",
+    "authors": [
+        {
+            "name": "wsign",
+            "email": "support@wsign.io"
+        }
+    ],
+    "support": {
+        "email": "support@wsign.io",
+        "docs": "https://developers.wsign.io/docs",
+        "issues": "https://github.com/wsign-io/wsign-php/issues",
+        "source": "https://github.com/wsign-io/wsign-php"
+    },
+    "require": {
+        "php": ">=8.1",
+        "ext-curl": "*",
+        "ext-json": "*"
+    },
+    "require-dev": {
+        "friendsofphp/php-cs-fixer": "^3.64",
+        "nyholm/psr7": "^1.8",
+        "phpstan/phpstan": "^2.0",
+        "phpunit/phpunit": "^10.5 || ^11.0",
+        "psr/http-client": "^1.0",
+        "psr/http-factory": "^1.0",
+        "psr/http-message": "^1.1 || ^2.0"
+    },
+    "suggest": {
+        "psr/http-client-implementation": "Use any PSR-18 HTTP client instead of the built-in cURL transport (see Wsign\\HttpClient\\Psr18Client)."
+    },
+    "autoload": {
+        "psr-4": {
+            "Wsign\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Wsign\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit --testsuite unit",
+        "test:integration": "phpunit --testsuite integration",
+        "analyse": "phpstan analyse --memory-limit=1G",
+        "cs": "php-cs-fixer fix --dry-run --diff",
+        "cs:fix": "php-cs-fixer fix",
+        "analyse:max": "phpstan analyse src --level=max --memory-limit=1G"
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "extra": {
+        "phpstan": {
+            "includes": [
+                "extension.neon"
+            ]
+        }
+    }
+}
